@@ -1,0 +1,114 @@
+// ValheimAIModLoader, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
+// ValheimAIMod.ValheimAIModLoader
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using BepInEx;
+using HarmonyLib;
+using Jotunn.Entities;
+using Jotunn.Managers;
+using UnityEngine;
+using ValheimAIMod;
+
+[BepInPlugin("egoai.thrallmodloader", "ego.ai Thrall Mod Loader", "1.0.0")]
+[BepInProcess("valheim.exe")]
+public class ValheimAIModLoader : BaseUnityPlugin
+{
+	public class DespawnAllCommand : ConsoleCommand
+	{
+		public override string Name => "despawn_all";
+
+		public override string Help => "Despawn all __INPUT_TEXT__ game objects";
+
+		public override void Run(string[] args)
+		{
+			if (args.Length == 0)
+			{
+				instance.DespawnPrefabInstances("HumanoidNPC");
+			}
+			else
+			{
+				instance.DespawnPrefabInstances(args[0]);
+			}
+		}
+	}
+
+	[HarmonyPatch(typeof(ZNetScene), "Awake")]
+	private static class ZNetScene_Awake_Patch
+	{
+		public static void Prefix(ZNetScene __instance)
+		{
+			if (!(__instance == null))
+			{
+			}
+		}
+	}
+
+	private static ValheimAIMod.ValheimAIModLoader instance;
+
+	private readonly Harmony harmony = new Harmony("egoai.thrallmodloader");
+
+	private static GameObject HumanoidNPCPrefab;
+
+	private void Awake()
+	{
+		//IL_0034: Unknown result type (might be due to invalid IL or missing references)
+		//IL_003e: Expected O, but got Unknown
+		instance = this;
+		RegisterConsoleCommands();
+		AssetBundle assetBundleFromResources = GetAssetBundleFromResources("scriptnpc");
+		HumanoidNPCPrefab = assetBundleFromResources.LoadAsset<GameObject>("Assets/CustomAssets/HumanoidNPC.prefab");
+		PrefabManager.Instance.AddPrefab(new CustomPrefab(HumanoidNPCPrefab, true));
+		if ((bool)HumanoidNPCPrefab)
+		{
+			Debug.Log("HumanoidNPCPrefab loaded");
+		}
+		else
+		{
+			Debug.LogError("HumanoidNPCPrefab not loaded");
+		}
+		assetBundleFromResources.Unload(false);
+		harmony.PatchAll();
+	}
+
+	private void OnDestroy()
+	{
+		harmony.UnpatchSelf();
+	}
+
+	public static AssetBundle GetAssetBundleFromResources(string fileName)
+	{
+		Assembly executingAssembly = Assembly.GetExecutingAssembly();
+		string name = executingAssembly.GetManifestResourceNames().Single((string str) => str.EndsWith(fileName));
+		using Stream stream = executingAssembly.GetManifestResourceStream(name);
+		return AssetBundle.LoadFromStream(stream);
+	}
+
+	private void RegisterConsoleCommands()
+	{
+		CommandManager.Instance.AddConsoleCommand((ConsoleCommand)(object)new DespawnAllCommand());
+	}
+
+	public void DespawnPrefabInstances(string prefabName)
+	{
+		List<GameObject> list = new List<GameObject>();
+		ZNetView[] array = Object.FindObjectsOfType<ZNetView>();
+		foreach (ZNetView zNetView in array)
+		{
+			if (zNetView.gameObject.name.Contains(prefabName))
+			{
+				list.Add(zNetView.gameObject);
+			}
+		}
+		foreach (GameObject item in list)
+		{
+			ZNetView component = item.GetComponent<ZNetView>();
+			if (component != null)
+			{
+				component.Destroy();
+			}
+		}
+		Console.instance.Print($"Despawned {list.Count} instances of prefab '{prefabName}'");
+	}
+}

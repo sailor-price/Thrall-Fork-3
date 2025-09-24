@@ -8,15 +8,6 @@ obj/
 *.cache
 *.ide
 
-# DLLs and executables
-*.dll
-*.exe
-*.pdb
-
-# ILSpy exports or decompiled junk
-*.il
-*.txt
-
 # Rider/VSCode/Visual Studio settings
 .vscode/
 .idea/
@@ -26,5 +17,17 @@ obj/
 .DS_Store
 Thumbs.db
 
-# Ignore references (they're large binaries, you can fetch again if needed)
-references/
+# Ignore compiled DLLs/EXEs you build yourself
+*.exe
+*.pdb
+
+# BUT keep reference DLLs for reproducible builds
+# (we allow references/ to be tracked)
+# If you don't want to push those big files, uncomment this:
+# references/
+
+# Keep docs (ILSpy dumps, notes, etc.)
+# So don't ignore *.txt globally
+# Instead, ignore only junk .txt in bin/obj
+bin/**/*.txt
+obj/**/*.txt
