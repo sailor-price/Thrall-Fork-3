@@ -1,0 +1,30 @@
+# Build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.tmp
+*.log
+*.cache
+*.ide
+
+# DLLs and executables
+*.dll
+*.exe
+*.pdb
+
+# ILSpy exports or decompiled junk
+*.il
+*.txt
+
+# Rider/VSCode/Visual Studio settings
+.vscode/
+.idea/
+*.csproj.user
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Ignore references (they're large binaries, you can fetch again if needed)
+references/
