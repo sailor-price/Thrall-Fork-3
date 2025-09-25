@@ -1,0 +1,2919 @@
+// assembly_utils, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null
+// ZInput
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Splatform;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
+using UnityEngine.InputSystem.DualShock;
+using UnityEngine.InputSystem.Layouts;
+using UnityEngine.InputSystem.LowLevel;
+using UnityEngine.InputSystem.Switch;
+using UnityEngine.InputSystem.XInput;
+using Valheim.SettingsGui;
+
+public class ZInput
+{
+	[Flags]
+	public enum InputSource
+	{
+		None = 0,
+		KeyboardMouse = 0xAA,
+		Gamepad = 0xB4,
+		AutomaticBlocking = 0xDF,
+		AutomaticNonBlocking = 0xDE,
+		KeyboardMouseOnly = 0xCB,
+		GamepadOnly = 0xD5,
+		BothKeyboardMouseHints = 0xCE,
+		BothGamepadHints = 0xD6,
+		BlockingBit = 1,
+		AllowKBMInputBit = 2,
+		AllowGamepadInputBit = 4,
+		AllowKBMHintsBit = 8,
+		AllowGamepadHintsBit = 0x10,
+		InputSourceBit = 0x20,
+		InputSwitchingModeBit = 0x40,
+		ValidBit = 0x80,
+		AllowedInputMask = 6,
+		AllowedHintsMask = 0x18
+	}
+
+	public class ButtonDef
+	{
+		public string Name;
+
+		private bool m_heldDynamic;
+
+		private bool m_heldFixed;
+
+		private bool m_pressedDynamic;
+
+		private bool m_pressedFixed;
+
+		private bool m_wasPressedDynamic;
+
+		private bool m_wasPressedFixed;
+
+		private bool m_releasedDynamic;
+
+		private bool m_releasedFixed;
+
+		private float m_repeatDelay;
+
+		private float m_repeatInterval;
+
+		public InputAction ButtonAction { get; }
+
+		public InputSource Source { get; private set; }
+
+		public bool Rebindable { get; private set; }
+
+		public bool ShowHints { get; private set; }
+
+		public bool AltKey { get; private set; }
+
+		public bool Held
+		{
+			get
+			{
+				if (!(Time.inFixedTimeStep ? m_heldFixed : m_heldDynamic))
+				{
+					if (Pressed)
+					{
+						return !Released;
+					}
+					return false;
+				}
+				return true;
+			}
+		}
+
+		public bool Pressed
+		{
+			get
+			{
+				if (!Time.inFixedTimeStep)
+				{
+					return m_pressedDynamic;
+				}
+				return m_pressedFixed;
+			}
+		}
+
+		public bool Released
+		{
+			get
+			{
+				if (!Time.inFixedTimeStep)
+				{
+					return m_releasedDynamic;
+				}
+				return m_releasedFixed;
+			}
+		}
+
+		public float PressedTimer { get; private set; }
+
+		public float LastPressedTimer { get; private set; }
+
+		public ButtonDef(string name, string path, bool altKey = false, bool showHints = true, bool rebindable = false, float repeatDelay = -1f, float repeatInterval = -1f, string pressPoint = "0.4")
+		{
+			Name = name;
+			ButtonAction = new InputAction(name, InputActionType.PassThrough, path, "press(pressPoint=" + pressPoint + ")");
+			ButtonAction.Enable();
+			Source = (path.Contains("Gamepad") ? InputSource.Gamepad : InputSource.KeyboardMouse);
+			AltKey = altKey;
+			ShowHints = showHints;
+			m_repeatDelay = repeatDelay;
+			m_repeatInterval = repeatInterval;
+			Rebindable = rebindable;
+		}
+
+		public void Tick(float deltaTime)
+		{
+			if (Time.inFixedTimeStep)
+			{
+				UpdatePressStates(ref m_heldFixed, ref m_pressedFixed, ref m_wasPressedFixed, ref m_releasedFixed);
+				return;
+			}
+			if (m_heldDynamic)
+			{
+				PressedTimer += deltaTime;
+			}
+			UpdatePressStates(ref m_heldDynamic, ref m_pressedDynamic, ref m_wasPressedDynamic, ref m_releasedDynamic);
+			if (m_repeatDelay > 0f && !m_releasedDynamic && PressedTimer > m_repeatDelay)
+			{
+				RePress();
+			}
+		}
+
+		private void UpdatePressStates(ref bool held, ref bool pressed, ref bool wasPressed, ref bool released)
+		{
+			pressed = !wasPressed & held;
+			released = wasPressed && !held;
+			wasPressed = held;
+		}
+
+		public void Press()
+		{
+			m_wasPressedDynamic = (m_wasPressedFixed = false);
+			m_heldDynamic = (m_heldFixed = true);
+			PressedTimer = 0f;
+		}
+
+		private void RePress()
+		{
+			if (!Released)
+			{
+				m_wasPressedDynamic = (m_wasPressedFixed = false);
+				PressedTimer -= m_repeatInterval;
+			}
+		}
+
+		public void Release()
+		{
+			m_heldDynamic = (m_heldFixed = false);
+			LastPressedTimer = PressedTimer;
+			PressedTimer = 0f;
+		}
+
+		public void ResetState()
+		{
+			m_wasPressedDynamic = (m_wasPressedFixed = false);
+			m_releasedDynamic = (m_releasedFixed = false);
+			m_pressedDynamic = (m_pressedFixed = false);
+			m_heldDynamic = (m_heldFixed = false);
+			float pressedTimer = (LastPressedTimer = 0f);
+			PressedTimer = pressedTimer;
+		}
+
+		public void Rebind(string newPath)
+		{
+			ButtonAction.Disable();
+			ButtonAction.RemoveAllBindingOverrides();
+			ButtonAction.ApplyBindingOverride(newPath);
+			ButtonAction.Enable();
+		}
+
+		public void ResetBinding()
+		{
+			ButtonAction.Disable();
+			ButtonAction.RemoveAllBindingOverrides();
+			ButtonAction.Enable();
+		}
+
+		public string GetActionPath(bool effective = true)
+		{
+			InputBinding inputBinding = ButtonAction.bindings[0];
+			if (inputBinding == default(InputBinding))
+			{
+				return null;
+			}
+			if (!effective)
+			{
+				return inputBinding.path;
+			}
+			return inputBinding.effectivePath;
+		}
+	}
+
+	public class ValueDef
+	{
+		public InputAction ValueAction;
+
+		public string Name { get; private set; }
+
+		public ValueDef(string name, string path, string interactions = null, string processors = null)
+		{
+			Name = name;
+			ValueAction = new InputAction(name, InputActionType.PassThrough, path, interactions, processors);
+			ValueAction.Enable();
+		}
+
+		public T GetValue<T>() where T : struct
+		{
+			return ValueAction.ReadValue<T>();
+		}
+
+		public T GetValueRaw<T>() where T : struct
+		{
+			if (!(ValueAction.activeControl is InputControl<T> inputControl))
+			{
+				return GetValue<T>();
+			}
+			return inputControl.ReadUnprocessedValue();
+		}
+	}
+
+	private static ZInput m_instance;
+
+	private bool m_systemUpdated;
+
+	private bool m_mouseInputThisFrame;
+
+	private static bool _workaroundEnabled = false;
+
+	private static bool m_virtualKeyboardOpen;
+
+	public PlatformGamepadDefinition m_definition;
+
+	public static InputLayout InputLayout = InputLayout.Default;
+
+	public static GamepadGlyphs CurrentGlyph;
+
+	public static Func<ZInput> GetZInput;
+
+	public static bool SwapTriggers = false;
+
+	public static bool ToggleRun = false;
+
+	public static bool ToggleRunState = false;
+
+	private const float m_stickDeadZone = 0.2f;
+
+	private const float m_axisPressDeadZone = 0.4f;
+
+	private const float m_gamepadInactiveTimeout = 60f;
+
+	private const float c_repeatDelay = 0.3f;
+
+	private const float c_repeatInterval = 0.1f;
+
+	private const string m_invertedText = "_inverted";
+
+	private const string ControllerLayout = "ControllerLayout";
+
+	private DateTime m_inputTimer = DateTime.Now;
+
+	private DateTime m_inputTimerGamepad = DateTime.Now;
+
+	private DateTime m_inputTimerMouse = DateTime.Now;
+
+	private InputAction m_mouseDelta;
+
+	private InputAction m_mousePosition;
+
+	private InputAction m_mouseScrollDeltaAction;
+
+	private InputAction m_radialMultiTap;
+
+	private InputAction m_radialTap;
+
+	private static GamepadType m_latestConnectedGamepadType = GamepadType.None;
+
+	private static InputSource s_inputSwitchingMode = InputSource.AutomaticNonBlocking;
+
+	private static InputSource m_inputSource = InputSource.KeyboardMouse;
+
+	private static bool? s_isInputSwitchingModeValid = null;
+
+	private static float m_blockGamePadInput;
+
+	private static int m_ignoreMouseInputFrames = 0;
+
+	private Dictionary<string, ButtonDef> m_buttons = new Dictionary<string, ButtonDef>();
+
+	private Dictionary<string, ValueDef> m_values = new Dictionary<string, ValueDef>();
+
+	private static readonly List<Key> s_keyCodeValues = Enum.GetValues(typeof(Key)).OfType<Key>().ToList();
+
+	private static readonly Dictionary<string, Dictionary<string, string>> s_gamepadSpriteMap = new Dictionary<string, Dictionary<string, string>>
+	{
+		{
+			"buttonSouth",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_a" },
+				{ "ps5", "button_cross" }
+			}
+		},
+		{
+			"buttonEast",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_b" },
+				{ "ps5", "button_circle" }
+			}
+		},
+		{
+			"buttonWest",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_x" },
+				{ "ps5", "button_square" }
+			}
+		},
+		{
+			"buttonNorth",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_y" },
+				{ "ps5", "button_triangle" }
+			}
+		},
+		{
+			"leftShoulder",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_lb" },
+				{ "ps5", "button_l1" }
+			}
+		},
+		{
+			"rightShoulder",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_rb" },
+				{ "ps5", "button_r1" }
+			}
+		},
+		{
+			"select",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_back" },
+				{ "ps5", "button_share" }
+			}
+		},
+		{
+			"start",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_start" },
+				{ "ps5", "button_options" }
+			}
+		},
+		{
+			"leftStickPress",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_ls" },
+				{ "ps5", "button_l3" }
+			}
+		},
+		{
+			"rightStickPress",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_rs" },
+				{ "ps5", "button_r3" }
+			}
+		},
+		{
+			"leftStick_left",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "lstick_left" },
+				{ "ps5", "lstick_left" }
+			}
+		},
+		{
+			"leftStick_right",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "lstick_right" },
+				{ "ps5", "lstick_right" }
+			}
+		},
+		{
+			"leftStick_up",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "lstick_up" },
+				{ "ps5", "lstick_up" }
+			}
+		},
+		{
+			"leftStick_down",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "lstick_down" },
+				{ "ps5", "lstick_down" }
+			}
+		},
+		{
+			"leftTrigger",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_lt" },
+				{ "ps5", "button_l2" }
+			}
+		},
+		{
+			"rightTrigger",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "button_rt" },
+				{ "ps5", "button_r2" }
+			}
+		},
+		{
+			"dpad_left",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "dpad_left" },
+				{ "ps5", "dpad_left" }
+			}
+		},
+		{
+			"dpad_right",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "dpad_right" },
+				{ "ps5", "dpad_right" }
+			}
+		},
+		{
+			"dpad_down",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "dpad_down" },
+				{ "ps5", "dpad_down" }
+			}
+		},
+		{
+			"dpad_up",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "dpad_up" },
+				{ "ps5", "dpad_up" }
+			}
+		},
+		{
+			"dpad",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "dpad" },
+				{ "ps5", "dpad" }
+			}
+		},
+		{
+			"leftStick",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "lstick" },
+				{ "ps5", "lstick" }
+			}
+		},
+		{
+			"rightStick",
+			new Dictionary<string, string>
+			{
+				{ "xbox", "rstick" },
+				{ "ps5", "rstick" }
+			}
+		}
+	};
+
+	private static readonly Dictionary<string, string> s_keyLocalizationMap = new Dictionary<string, string>
+	{
+		{ "comma", "," },
+		{ "period", "." },
+		{ "leftButton", "$button_mouse0" },
+		{ "rightButton", "$button_mouse1" },
+		{ "middleButton", "$button_mouse2" },
+		{ "space", "$button_space" },
+		{ "shift", "$button_lshift" },
+		{ "leftShift", "$button_lshift" },
+		{ "rightShift", "$button_rshift" },
+		{ "alt", "$button_lalt" },
+		{ "leftAlt", "$button_lalt" },
+		{ "rightAlt", "$button_ralt" },
+		{ "ctrl", "$button_lctrl" },
+		{ "leftCtrl", "$button_lctrl" },
+		{ "rightCtrl", "$button_rctrl" },
+		{ "enter", "$button_return" }
+	};
+
+	private static readonly Dictionary<GamepadInput, string> s_gamepadInputPathMap = new Dictionary<GamepadInput, string>
+	{
+		{
+			GamepadInput.None,
+			""
+		},
+		{
+			GamepadInput.DPadLeft,
+			"<Gamepad>/dpad/left"
+		},
+		{
+			GamepadInput.DPadRight,
+			"<Gamepad>/dpad/right"
+		},
+		{
+			GamepadInput.DPadDown,
+			"<Gamepad>/dpad/down"
+		},
+		{
+			GamepadInput.DPadUp,
+			"<Gamepad>/dpad/up"
+		},
+		{
+			GamepadInput.FaceButtonA,
+			"<Gamepad>/buttonSouth"
+		},
+		{
+			GamepadInput.FaceButtonB,
+			"<Gamepad>/buttonEast"
+		},
+		{
+			GamepadInput.FaceButtonX,
+			"<Gamepad>/buttonWest"
+		},
+		{
+			GamepadInput.FaceButtonY,
+			"<Gamepad>/buttonNorth"
+		},
+		{
+			GamepadInput.StickLHorizontal,
+			"<Gamepad>/leftStick/x"
+		},
+		{
+			GamepadInput.StickLVertical,
+			"<Gamepad>/leftStick/y"
+		},
+		{
+			GamepadInput.StickLButton,
+			"<Gamepad>/leftStickPress"
+		},
+		{
+			GamepadInput.StickRHorizontal,
+			"<Gamepad>/rightStick/x"
+		},
+		{
+			GamepadInput.StickRVertical,
+			"<Gamepad>/rightStick/y"
+		},
+		{
+			GamepadInput.StickRButton,
+			"<Gamepad>/rightStickPress"
+		},
+		{
+			GamepadInput.BumperL,
+			"<Gamepad>/leftShoulder"
+		},
+		{
+			GamepadInput.BumperR,
+			"<Gamepad>/rightShoulder"
+		},
+		{
+			GamepadInput.TriggerL,
+			"<Gamepad>/leftTrigger"
+		},
+		{
+			GamepadInput.TriggerR,
+			"<Gamepad>/rightTrigger"
+		},
+		{
+			GamepadInput.Select,
+			"<Gamepad>/select"
+		},
+		{
+			GamepadInput.Start,
+			"<Gamepad>/start"
+		},
+		{
+			GamepadInput.DualShockTouchpad,
+			"<DualShockGamepad>/touchpadButton"
+		},
+		{
+			GamepadInput.StickRUp,
+			"<Gamepad>/rightStick/up"
+		},
+		{
+			GamepadInput.StickRDown,
+			"<Gamepad>/rightStick/down"
+		},
+		{
+			GamepadInput.StickRLeft,
+			"<Gamepad>/rightStick/left"
+		},
+		{
+			GamepadInput.StickRRight,
+			"<Gamepad>/rightStick/right"
+		},
+		{
+			GamepadInput.StickLUp,
+			"<Gamepad>/leftStick/up"
+		},
+		{
+			GamepadInput.StickLDown,
+			"<Gamepad>/leftStick/down"
+		},
+		{
+			GamepadInput.StickLRight,
+			"<Gamepad>/leftStick/right"
+		},
+		{
+			GamepadInput.StickLLeft,
+			"<Gamepad>/leftStick/left"
+		},
+		{
+			GamepadInput.StickR,
+			"<Gamepad>/rightStick"
+		},
+		{
+			GamepadInput.StickL,
+			"<Gamepad>/leftStick"
+		}
+	};
+
+	private static readonly Dictionary<KeyCode, MouseButton> s_keyCodeToMouseButtonMap = new Dictionary<KeyCode, MouseButton>
+	{
+		{
+			KeyCode.Mouse0,
+			MouseButton.Left
+		},
+		{
+			KeyCode.Mouse1,
+			MouseButton.Right
+		},
+		{
+			KeyCode.Mouse2,
+			MouseButton.Middle
+		},
+		{
+			KeyCode.Mouse3,
+			MouseButton.Forward
+		},
+		{
+			KeyCode.Mouse4,
+			MouseButton.Back
+		}
+	};
+
+	private static readonly Dictionary<KeyCode, GamepadInput> s_keyCodeToGamepadInputMap = new Dictionary<KeyCode, GamepadInput>
+	{
+		{
+			KeyCode.JoystickButton0,
+			GamepadInput.FaceButtonA
+		},
+		{
+			KeyCode.JoystickButton16,
+			GamepadInput.FaceButtonA
+		},
+		{
+			KeyCode.JoystickButton1,
+			GamepadInput.FaceButtonB
+		},
+		{
+			KeyCode.JoystickButton17,
+			GamepadInput.FaceButtonB
+		},
+		{
+			KeyCode.JoystickButton2,
+			GamepadInput.FaceButtonX
+		},
+		{
+			KeyCode.JoystickButton18,
+			GamepadInput.FaceButtonX
+		},
+		{
+			KeyCode.JoystickButton3,
+			GamepadInput.FaceButtonY
+		},
+		{
+			KeyCode.JoystickButton19,
+			GamepadInput.FaceButtonY
+		},
+		{
+			KeyCode.JoystickButton4,
+			GamepadInput.BumperL
+		},
+		{
+			KeyCode.JoystickButton13,
+			GamepadInput.BumperL
+		},
+		{
+			KeyCode.JoystickButton5,
+			GamepadInput.BumperR
+		},
+		{
+			KeyCode.JoystickButton14,
+			GamepadInput.BumperR
+		},
+		{
+			KeyCode.JoystickButton6,
+			GamepadInput.Select
+		},
+		{
+			KeyCode.JoystickButton10,
+			GamepadInput.Select
+		},
+		{
+			KeyCode.JoystickButton7,
+			GamepadInput.Start
+		},
+		{
+			KeyCode.JoystickButton9,
+			GamepadInput.StickRButton
+		},
+		{
+			KeyCode.JoystickButton8,
+			GamepadInput.StickLButton
+		},
+		{
+			KeyCode.JoystickButton11,
+			GamepadInput.StickLButton
+		},
+		{
+			KeyCode.JoystickButton12,
+			GamepadInput.StickRButton
+		}
+	};
+
+	private static readonly Dictionary<KeyCode, GamepadButton> s_keyCodeToGamepadButtonMap = new Dictionary<KeyCode, GamepadButton>
+	{
+		{
+			KeyCode.JoystickButton0,
+			GamepadButton.South
+		},
+		{
+			KeyCode.JoystickButton16,
+			GamepadButton.South
+		},
+		{
+			KeyCode.JoystickButton1,
+			GamepadButton.East
+		},
+		{
+			KeyCode.JoystickButton17,
+			GamepadButton.East
+		},
+		{
+			KeyCode.JoystickButton2,
+			GamepadButton.West
+		},
+		{
+			KeyCode.JoystickButton18,
+			GamepadButton.West
+		},
+		{
+			KeyCode.JoystickButton3,
+			GamepadButton.North
+		},
+		{
+			KeyCode.JoystickButton19,
+			GamepadButton.North
+		},
+		{
+			KeyCode.JoystickButton4,
+			GamepadButton.LeftShoulder
+		},
+		{
+			KeyCode.JoystickButton13,
+			GamepadButton.LeftShoulder
+		},
+		{
+			KeyCode.JoystickButton5,
+			GamepadButton.RightShoulder
+		},
+		{
+			KeyCode.JoystickButton14,
+			GamepadButton.RightShoulder
+		},
+		{
+			KeyCode.JoystickButton6,
+			GamepadButton.Select
+		},
+		{
+			KeyCode.JoystickButton10,
+			GamepadButton.Select
+		},
+		{
+			KeyCode.JoystickButton7,
+			GamepadButton.Start
+		},
+		{
+			KeyCode.JoystickButton9,
+			GamepadButton.RightStick
+		},
+		{
+			KeyCode.JoystickButton8,
+			GamepadButton.LeftStick
+		},
+		{
+			KeyCode.JoystickButton11,
+			GamepadButton.LeftStick
+		},
+		{
+			KeyCode.JoystickButton12,
+			GamepadButton.RightStick
+		}
+	};
+
+	private static readonly Dictionary<KeyCode, Key> s_keyCodeToKeyMap = new Dictionary<KeyCode, Key>
+	{
+		{
+			KeyCode.None,
+			Key.None
+		},
+		{
+			KeyCode.Space,
+			Key.Space
+		},
+		{
+			KeyCode.Backspace,
+			Key.Backspace
+		},
+		{
+			KeyCode.Delete,
+			Key.Delete
+		},
+		{
+			KeyCode.Tab,
+			Key.Tab
+		},
+		{
+			KeyCode.Return,
+			Key.Enter
+		},
+		{
+			KeyCode.Pause,
+			Key.Pause
+		},
+		{
+			KeyCode.Escape,
+			Key.Escape
+		},
+		{
+			KeyCode.Keypad0,
+			Key.Numpad0
+		},
+		{
+			KeyCode.Keypad1,
+			Key.Numpad1
+		},
+		{
+			KeyCode.Keypad2,
+			Key.Numpad2
+		},
+		{
+			KeyCode.Keypad3,
+			Key.Numpad3
+		},
+		{
+			KeyCode.Keypad4,
+			Key.Numpad4
+		},
+		{
+			KeyCode.Keypad5,
+			Key.Numpad5
+		},
+		{
+			KeyCode.Keypad6,
+			Key.Numpad6
+		},
+		{
+			KeyCode.Keypad7,
+			Key.Numpad7
+		},
+		{
+			KeyCode.Keypad8,
+			Key.Numpad8
+		},
+		{
+			KeyCode.Keypad9,
+			Key.Numpad9
+		},
+		{
+			KeyCode.KeypadPeriod,
+			Key.NumpadPeriod
+		},
+		{
+			KeyCode.KeypadDivide,
+			Key.NumpadDivide
+		},
+		{
+			KeyCode.KeypadMultiply,
+			Key.NumpadMultiply
+		},
+		{
+			KeyCode.KeypadMinus,
+			Key.NumpadMinus
+		},
+		{
+			KeyCode.KeypadPlus,
+			Key.NumpadPlus
+		},
+		{
+			KeyCode.KeypadEnter,
+			Key.NumpadEnter
+		},
+		{
+			KeyCode.KeypadEquals,
+			Key.NumpadEquals
+		},
+		{
+			KeyCode.UpArrow,
+			Key.UpArrow
+		},
+		{
+			KeyCode.DownArrow,
+			Key.DownArrow
+		},
+		{
+			KeyCode.RightArrow,
+			Key.RightArrow
+		},
+		{
+			KeyCode.LeftArrow,
+			Key.LeftArrow
+		},
+		{
+			KeyCode.Insert,
+			Key.Insert
+		},
+		{
+			KeyCode.Home,
+			Key.Home
+		},
+		{
+			KeyCode.End,
+			Key.End
+		},
+		{
+			KeyCode.PageUp,
+			Key.PageUp
+		},
+		{
+			KeyCode.PageDown,
+			Key.PageDown
+		},
+		{
+			KeyCode.F1,
+			Key.F1
+		},
+		{
+			KeyCode.F2,
+			Key.F2
+		},
+		{
+			KeyCode.F3,
+			Key.F3
+		},
+		{
+			KeyCode.F4,
+			Key.F4
+		},
+		{
+			KeyCode.F5,
+			Key.F5
+		},
+		{
+			KeyCode.F6,
+			Key.F6
+		},
+		{
+			KeyCode.F7,
+			Key.F7
+		},
+		{
+			KeyCode.F8,
+			Key.F8
+		},
+		{
+			KeyCode.F9,
+			Key.F9
+		},
+		{
+			KeyCode.F10,
+			Key.F10
+		},
+		{
+			KeyCode.F11,
+			Key.F11
+		},
+		{
+			KeyCode.F12,
+			Key.F12
+		},
+		{
+			KeyCode.Alpha0,
+			Key.Digit0
+		},
+		{
+			KeyCode.Alpha1,
+			Key.Digit1
+		},
+		{
+			KeyCode.Alpha2,
+			Key.Digit2
+		},
+		{
+			KeyCode.Alpha3,
+			Key.Digit3
+		},
+		{
+			KeyCode.Alpha4,
+			Key.Digit4
+		},
+		{
+			KeyCode.Alpha5,
+			Key.Digit5
+		},
+		{
+			KeyCode.Alpha6,
+			Key.Digit6
+		},
+		{
+			KeyCode.Alpha7,
+			Key.Digit7
+		},
+		{
+			KeyCode.Alpha8,
+			Key.Digit8
+		},
+		{
+			KeyCode.Alpha9,
+			Key.Digit9
+		},
+		{
+			KeyCode.Quote,
+			Key.Quote
+		},
+		{
+			KeyCode.Comma,
+			Key.Comma
+		},
+		{
+			KeyCode.Minus,
+			Key.Minus
+		},
+		{
+			KeyCode.Period,
+			Key.Period
+		},
+		{
+			KeyCode.Slash,
+			Key.Slash
+		},
+		{
+			KeyCode.Semicolon,
+			Key.Semicolon
+		},
+		{
+			KeyCode.Equals,
+			Key.Equals
+		},
+		{
+			KeyCode.LeftBracket,
+			Key.LeftBracket
+		},
+		{
+			KeyCode.Backslash,
+			Key.Backslash
+		},
+		{
+			KeyCode.RightBracket,
+			Key.RightBracket
+		},
+		{
+			KeyCode.BackQuote,
+			Key.Backquote
+		},
+		{
+			KeyCode.A,
+			Key.A
+		},
+		{
+			KeyCode.B,
+			Key.B
+		},
+		{
+			KeyCode.C,
+			Key.C
+		},
+		{
+			KeyCode.D,
+			Key.D
+		},
+		{
+			KeyCode.E,
+			Key.E
+		},
+		{
+			KeyCode.F,
+			Key.F
+		},
+		{
+			KeyCode.G,
+			Key.G
+		},
+		{
+			KeyCode.H,
+			Key.H
+		},
+		{
+			KeyCode.I,
+			Key.I
+		},
+		{
+			KeyCode.J,
+			Key.J
+		},
+		{
+			KeyCode.K,
+			Key.K
+		},
+		{
+			KeyCode.L,
+			Key.L
+		},
+		{
+			KeyCode.M,
+			Key.M
+		},
+		{
+			KeyCode.N,
+			Key.N
+		},
+		{
+			KeyCode.O,
+			Key.O
+		},
+		{
+			KeyCode.P,
+			Key.P
+		},
+		{
+			KeyCode.Q,
+			Key.Q
+		},
+		{
+			KeyCode.R,
+			Key.R
+		},
+		{
+			KeyCode.S,
+			Key.S
+		},
+		{
+			KeyCode.T,
+			Key.T
+		},
+		{
+			KeyCode.U,
+			Key.U
+		},
+		{
+			KeyCode.V,
+			Key.V
+		},
+		{
+			KeyCode.W,
+			Key.W
+		},
+		{
+			KeyCode.X,
+			Key.X
+		},
+		{
+			KeyCode.Y,
+			Key.Y
+		},
+		{
+			KeyCode.Z,
+			Key.Z
+		},
+		{
+			KeyCode.Numlock,
+			Key.NumLock
+		},
+		{
+			KeyCode.CapsLock,
+			Key.CapsLock
+		},
+		{
+			KeyCode.ScrollLock,
+			Key.ScrollLock
+		},
+		{
+			KeyCode.RightShift,
+			Key.RightShift
+		},
+		{
+			KeyCode.LeftShift,
+			Key.LeftShift
+		},
+		{
+			KeyCode.RightControl,
+			Key.RightCtrl
+		},
+		{
+			KeyCode.LeftControl,
+			Key.LeftCtrl
+		},
+		{
+			KeyCode.RightAlt,
+			Key.RightAlt
+		},
+		{
+			KeyCode.LeftAlt,
+			Key.LeftAlt
+		},
+		{
+			KeyCode.LeftMeta,
+			Key.LeftMeta
+		},
+		{
+			KeyCode.LeftWindows,
+			Key.LeftMeta
+		},
+		{
+			KeyCode.RightMeta,
+			Key.RightMeta
+		},
+		{
+			KeyCode.RightWindows,
+			Key.RightMeta
+		},
+		{
+			KeyCode.AltGr,
+			Key.RightAlt
+		},
+		{
+			KeyCode.Print,
+			Key.PrintScreen
+		},
+		{
+			KeyCode.Menu,
+			Key.ContextMenu
+		}
+	};
+
+	public static ZInput instance => m_instance;
+
+	public static Vector3 mousePosition => m_instance?.Input_GetMousePosition() ?? Vector3.zero;
+
+	private static GamepadType ConnectedGamepadType
+	{
+		get
+		{
+			Gamepad current = Gamepad.current;
+			if (current != null)
+			{
+				if (!(current is XInputController))
+				{
+					if (!(current is DualShock4GamepadHID))
+					{
+						if (!(current is DualShockGamepad))
+						{
+							if (current is SwitchProControllerHID)
+							{
+								return GamepadType.SwitchPro;
+							}
+							return GamepadType.Generic;
+						}
+						return GamepadType.DualSense;
+					}
+					return GamepadType.DualShock;
+				}
+				return GamepadType.XInput;
+			}
+			return GamepadType.None;
+		}
+	}
+
+	public static bool s_IsRebindActive { get; private set; }
+
+	public static bool GamepadActive => m_inputSource == InputSource.Gamepad;
+
+	public static bool WorkaroundEnabled
+	{
+		get
+		{
+			return _workaroundEnabled;
+		}
+		set
+		{
+		}
+	}
+
+	public static bool SwapFaceButtons => false;
+
+	public static bool VirtualKeyboardOpen
+	{
+		get
+		{
+			return m_virtualKeyboardOpen;
+		}
+		set
+		{
+			if (value)
+			{
+				ResetAllButtonStates();
+			}
+			if (m_virtualKeyboardOpen != value)
+			{
+				m_blockGamePadInput = 0.3f;
+			}
+			m_virtualKeyboardOpen = value;
+		}
+	}
+
+	public static string CompositionString
+	{
+		get
+		{
+			BaseInput input = EventSystem.current.currentInputModule.input;
+			if (!(input != null))
+			{
+				return Input.compositionString;
+			}
+			return input.compositionString;
+		}
+	}
+
+	public static int CompositionLength => CompositionString.Length;
+
+	public static event Action OnInputLayoutChanged;
+
+	public static void Initialize()
+	{
+		if (PlatformPrefs.GetInt("ControllerLayout", -1) >= 0)
+		{
+			InputLayout = (InputLayout)PlatformPrefs.GetInt("ControllerLayout");
+		}
+		if (m_instance == null)
+		{
+			m_instance = new ZInput();
+		}
+	}
+
+	public ZInput()
+	{
+		InputSystem.RegisterInteraction<Vector2MultiTap>();
+		InputSystem.RegisterInteraction<Vector2Tap>();
+		InputSystem.RegisterProcessor<FloatDeadzone>();
+		InputSystem.RegisterProcessor<Vector2Deadzone>();
+		GamepadType gamepadFromCLArgs = GetGamepadFromCLArgs();
+		if (gamepadFromCLArgs != GamepadType.None)
+		{
+			m_definition = PlatformGamepadDefinition.Get(gamepadFromCLArgs);
+		}
+		if (m_definition == null)
+		{
+			gamepadFromCLArgs = GamepadType.NewInputSystem;
+			m_definition = PlatformGamepadDefinition.Get(gamepadFromCLArgs);
+		}
+		InputSystem.onDeviceChange += OnDeviceChanged;
+		SetUpMouseAndStickHandlers();
+		SetUpStickHandlers();
+		Reset();
+		Load();
+	}
+
+	[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+	private static void Init()
+	{
+		InputSystem.RegisterLayout<DualSenseGamepadHID>("DualSense Edge", default(InputDeviceMatcher).WithInterface("HID").WithManufacturer("Sony Interactive Entertainment").WithProduct("DualSense Edge Wireless Controller"));
+	}
+
+	private GamepadType GetGamepadFromCLArgs()
+	{
+		string[] commandLineArgs = Environment.GetCommandLineArgs();
+		for (int i = 0; i < commandLineArgs.Length - 1; i++)
+		{
+			if (commandLineArgs[i] == "-gamepad" && Enum.TryParse<GamepadType>(commandLineArgs[i + 1], ignoreCase: true, out var result))
+			{
+				return result;
+			}
+		}
+		return GamepadType.None;
+	}
+
+	public static void Update(float dt)
+	{
+		if (m_instance != null)
+		{
+			m_instance.InternalUpdate(dt);
+		}
+	}
+
+	private void InternalUpdate(float dt)
+	{
+		if (WorkaroundEnabled && !m_systemUpdated)
+		{
+			InputSystem.Update();
+		}
+		UpdateMouseInput();
+		if (m_blockGamePadInput > 0f)
+		{
+			m_blockGamePadInput -= dt;
+		}
+		foreach (ButtonDef value in m_buttons.Values)
+		{
+			value.Tick(dt);
+		}
+		m_systemUpdated = false;
+	}
+
+	public static void FixedUpdate(float dt)
+	{
+		if (m_instance != null)
+		{
+			m_instance.InternalUpdateFixed(dt);
+		}
+	}
+
+	private void InternalUpdateFixed(float dt)
+	{
+		if (WorkaroundEnabled && !m_systemUpdated)
+		{
+			InputSystem.Update();
+			m_systemUpdated = true;
+		}
+		foreach (ButtonDef value in m_buttons.Values)
+		{
+			value.Tick(dt);
+		}
+	}
+
+	public static void OnGUI()
+	{
+		if (m_instance != null)
+		{
+			m_instance.OnGUIInternal();
+		}
+	}
+
+	private void OnGUIInternal()
+	{
+		if (Event.current.isKey && Event.current.keyCode > KeyCode.None && Event.current.keyCode < KeyCode.JoystickButton0)
+		{
+			OnInput(InputSource.KeyboardMouse, allowSwitchInputSource: true);
+		}
+	}
+
+	public void Reset()
+	{
+		ClearButtons();
+		ResetKBMButtons();
+		UpdateGamepadInputLayout(clearButtons: false);
+	}
+
+	public void Save()
+	{
+		PlayerPrefs.DeleteKey("gamepad_enabled");
+		PlayerPrefs.SetInt("input_switching_mode", (int)s_inputSwitchingMode);
+		foreach (ButtonDef item in m_buttons.Values.Where((ButtonDef b) => b.Rebindable).ToList())
+		{
+			PlayerPrefs.SetString("kbmBinding_" + item.Name, item.GetActionPath());
+		}
+		NukeLegacyPlayerPrefs();
+	}
+
+	public void Load()
+	{
+		SwapTriggers = PlayerPrefs.GetInt("SwapTriggers", 0) == 1;
+		ToggleRun = PlayerPrefs.GetInt("ToggleRun", IsGamepadActive() ? 1 : 0) == 1;
+		Reset();
+		if (PlayerPrefs.GetInt("LegacyNuked", 0) != 1)
+		{
+			LoadLegacyPlayerPrefs();
+		}
+		InputSource inputSource = (InputSource)PlayerPrefs.GetInt("input_switching_mode", 0);
+		int num = PlayerPrefs.GetInt("gamepad_enabled", -1);
+		if (Enum.IsDefined(typeof(InputSource), inputSource) && inputSource.HasFlag(InputSource.InputSwitchingModeBit | InputSource.ValidBit))
+		{
+			SetInputSwitchingMode(inputSource);
+		}
+		else if (num >= 0)
+		{
+			SetInputSwitchingMode((num == 1) ? InputSource.AutomaticNonBlocking : InputSource.KeyboardMouseOnly);
+		}
+		else
+		{
+			SetInputSwitchingMode(InputSource.AutomaticNonBlocking);
+		}
+		foreach (ButtonDef item in m_buttons.Values.Where((ButtonDef b) => b.Rebindable && PlayerPrefs.HasKey("kbmBinding_" + b.Name)).ToList())
+		{
+			item.Rebind(PlayerPrefs.GetString("kbmBinding_" + item.Name));
+		}
+	}
+
+	private void LoadLegacyPlayerPrefs()
+	{
+		foreach (ButtonDef item in m_buttons.Values.Where((ButtonDef b) => b.Rebindable).ToList())
+		{
+			string text = "kbmKey_" + item.Name;
+			if (PlayerPrefs.HasKey(text))
+			{
+				item.Rebind((PlayerPrefs.GetInt(text + "_isMouseButton", 0) != 0) ? MouseButtonToPath((MouseButton)PlayerPrefs.GetInt(text, 0)) : KeyToPath((Key)PlayerPrefs.GetInt(text, 0)));
+				continue;
+			}
+			string key = "key_" + item.Name;
+			if (PlayerPrefs.HasKey(key))
+			{
+				KeyCode keyCode = (KeyCode)PlayerPrefs.GetInt(key, 0);
+				MouseButton result2;
+				if (TryKeyCodeToKey(keyCode, out var result))
+				{
+					item.Rebind(KeyToPath(result));
+				}
+				else if (TryKeyCodeToMouseButton(keyCode, out result2))
+				{
+					item.Rebind(MouseButtonToPath(result2));
+				}
+			}
+		}
+	}
+
+	private void NukeLegacyPlayerPrefs()
+	{
+		foreach (ButtonDef value in m_buttons.Values)
+		{
+			DeleteLegacyPlayerPrefKey("kbmKey_" + value.Name);
+			DeleteLegacyPlayerPrefKey("kbmKey_" + value.Name + "_isMouseButton");
+			DeleteLegacyPlayerPrefKey("key_" + value.Name);
+		}
+		DeleteLegacyPlayerPrefKey("kbmKey_Forward");
+		DeleteLegacyPlayerPrefKey("kbmKey_Forward_isMouseButton");
+		DeleteLegacyPlayerPrefKey("kbmKey_Backward");
+		DeleteLegacyPlayerPrefKey("kbmKey_Backward_isMouseButton");
+		DeleteLegacyPlayerPrefKey("kbmKey_Left");
+		DeleteLegacyPlayerPrefKey("kbmKey_Left_isMouseButton");
+		DeleteLegacyPlayerPrefKey("kbmKey_Right");
+		DeleteLegacyPlayerPrefKey("kbmKey_Right_isMouseButton");
+		DeleteLegacyPlayerPrefKey("key_Forward");
+		DeleteLegacyPlayerPrefKey("key_Backward");
+		DeleteLegacyPlayerPrefKey("key_Left");
+		DeleteLegacyPlayerPrefKey("key_Right");
+		PlayerPrefs.SetInt("LegacyNuked", 1);
+	}
+
+	private void DeleteLegacyPlayerPrefKey(string key)
+	{
+		if (PlayerPrefs.HasKey(key))
+		{
+			PlayerPrefs.DeleteKey(key);
+		}
+	}
+
+	private void UpdateMouseInput()
+	{
+		if (GetMouseDelta() != Vector2.zero)
+		{
+			OnInput(InputSource.KeyboardMouse, allowSwitchInputSource: true);
+			m_mouseInputThisFrame = true;
+		}
+		else
+		{
+			m_mouseInputThisFrame = false;
+		}
+	}
+
+	private static void InvalidateInputSwitchingModeValid()
+	{
+		s_isInputSwitchingModeValid = null;
+	}
+
+	public static void SetGamepadEnabled(bool enabled)
+	{
+		SetInputSwitchingMode(enabled ? InputSource.AutomaticNonBlocking : InputSource.KeyboardMouseOnly);
+	}
+
+	public static void SetInputSwitchingMode(InputSource inputSwitchingMode)
+	{
+		if (inputSwitchingMode != InputSource.None)
+		{
+			s_inputSwitchingMode = inputSwitchingMode;
+		}
+		else
+		{
+			ZLog.LogError($"Can't set input switching mode to {InputSource.None}! Forcing value to {InputSource.AutomaticNonBlocking}");
+			s_inputSwitchingMode = InputSource.AutomaticNonBlocking;
+		}
+		InvalidateInputSwitchingModeValid();
+		InputSource inputSource = m_inputSource;
+		switch (s_inputSwitchingMode)
+		{
+		case InputSource.KeyboardMouseOnly:
+		case InputSource.BothKeyboardMouseHints:
+			inputSource = InputSource.KeyboardMouse;
+			break;
+		case InputSource.GamepadOnly:
+		case InputSource.BothGamepadHints:
+			inputSource = InputSource.Gamepad;
+			break;
+		}
+		bool flag = inputSource != m_inputSource;
+		m_inputSource = inputSource;
+		if (flag && instance != null)
+		{
+			ZInput.OnInputLayoutChanged?.Invoke();
+		}
+	}
+
+	private void OnInput(InputSource inputSource, bool allowSwitchInputSource)
+	{
+		if (inputSource == InputSource.Gamepad && allowSwitchInputSource && PlatformManager.DistributionPlatform.InputDeviceManager != null)
+		{
+			PlatformManager.DistributionPlatform.InputDeviceManager.NotifyGamepadInput();
+		}
+		if (inputSource == InputSource.Gamepad && (m_virtualKeyboardOpen || m_blockGamePadInput > 0f || m_mouseInputThisFrame))
+		{
+			return;
+		}
+		if (allowSwitchInputSource && s_inputSwitchingMode.HasFlag(InputSource.AllowedInputMask))
+		{
+			bool num = m_inputSource != inputSource;
+			m_inputSource = inputSource;
+			if (num && instance != null)
+			{
+				ZInput.OnInputLayoutChanged?.Invoke();
+			}
+		}
+		if (m_inputSource == inputSource)
+		{
+			m_inputTimer = DateTime.Now;
+			switch (m_inputSource)
+			{
+			case InputSource.KeyboardMouse:
+				m_inputTimerMouse = m_inputTimer;
+				break;
+			case InputSource.Gamepad:
+				m_inputTimerGamepad = m_inputTimer;
+				break;
+			}
+		}
+	}
+
+	private void OnDeviceChanged(InputDevice device, InputDeviceChange change)
+	{
+		if (device is Gamepad && (change == InputDeviceChange.Added || change == InputDeviceChange.Reconnected || change == InputDeviceChange.ConfigurationChanged))
+		{
+			ZInput.OnInputLayoutChanged?.Invoke();
+		}
+	}
+
+	private void OnActionPerformed(InputAction.CallbackContext ctx)
+	{
+		InputSource inputSource = ((ctx.control.device is Gamepad) ? InputSource.Gamepad : InputSource.KeyboardMouse);
+		if (ShouldAcceptInputFromSource(inputSource) && ctx.action.IsPressed() && m_buttons.TryGetValue(ctx.action.name, out var value))
+		{
+			value.Press();
+			OnInput(inputSource, allowSwitchInputSource: true);
+		}
+	}
+
+	private void OnActionCanceled(InputAction.CallbackContext ctx)
+	{
+		if (ShouldAcceptInputFromSource((ctx.control.device is Gamepad) ? InputSource.Gamepad : InputSource.KeyboardMouse) && m_buttons.TryGetValue(ctx.action.name, out var value))
+		{
+			value.Release();
+		}
+	}
+
+	private Vector3 Input_GetMousePosition()
+	{
+		return m_mousePosition.ReadValue<Vector2>();
+	}
+
+	public static Vector2 GetMouseDelta()
+	{
+		return m_instance?.Internal_GetMouseDelta() ?? Vector2.zero;
+	}
+
+	private Vector2 Internal_GetMouseDelta()
+	{
+		Vector2 result = m_mouseDelta.ReadValue<Vector2>();
+		if (!result.Equals(Vector2.zero))
+		{
+			m_instance.OnInput(InputSource.KeyboardMouse, allowSwitchInputSource: true);
+		}
+		if (ShouldAcceptInputFromSource(InputSource.KeyboardMouse))
+		{
+			return result;
+		}
+		return Vector2.zero;
+	}
+
+	public static float GetMouseScrollWheel()
+	{
+		return m_instance?.Internal_GetMouseScrollWheel() ?? 0f;
+	}
+
+	private float Internal_GetMouseScrollWheel()
+	{
+		float num = m_mouseScrollDeltaAction.ReadValue<float>() * GetScrollModifier();
+		if (num != 0f)
+		{
+			OnInput(InputSource.KeyboardMouse, allowSwitchInputSource: true);
+		}
+		if (ShouldAcceptInputFromSource(InputSource.KeyboardMouse))
+		{
+			return num;
+		}
+		return 0f;
+	}
+
+	public static T GetValue<T>(string name) where T : struct
+	{
+		return ReadValueDef<T>(name);
+	}
+
+	public static float GetJoyLTrigger()
+	{
+		return ReadValueDef<float>("TriggerL");
+	}
+
+	public static float GetJoyRTrigger()
+	{
+		return ReadValueDef<float>("TriggerR");
+	}
+
+	public static float GetJoyRightStickX(bool smooth = true)
+	{
+		return ReadValueDef<Vector2>("StickR", smooth).x;
+	}
+
+	public static float GetJoyRightStickY(bool smooth = true)
+	{
+		return 0f - ReadValueDef<Vector2>("StickR", smooth).y;
+	}
+
+	public static float GetJoyLeftStickX(bool smooth = false)
+	{
+		return ReadValueDef<Vector2>("StickL", smooth).x;
+	}
+
+	public static float GetJoyLeftStickY(bool smooth = true)
+	{
+		return 0f - ReadValueDef<Vector2>("StickL", smooth).y;
+	}
+
+	private static T ReadValueDef<T>(string name, bool smooth = false) where T : struct
+	{
+		if (m_instance == null)
+		{
+			return default(T);
+		}
+		if (!m_instance.m_values.TryGetValue(name, out var value))
+		{
+			Debug.LogError("No ValueDef with name " + name + " found.");
+			return default(T);
+		}
+		T valueRaw = value.GetValueRaw<T>();
+		if (!(valueRaw is float value2))
+		{
+			if (valueRaw is Vector2 value3)
+			{
+				return (T)(object)m_instance.ApplyDeadzoneVector(value3, smooth);
+			}
+			return valueRaw;
+		}
+		return (T)(object)m_instance.ApplyDeadzoneFloat(value2, smooth);
+	}
+
+	public static bool GetRadialTap()
+	{
+		return m_instance?.m_radialTap.WasPerformedThisFrame() ?? false;
+	}
+
+	public static bool GetRadialMultiTap()
+	{
+		return m_instance?.m_radialMultiTap.WasPerformedThisFrame() ?? false;
+	}
+
+	public static bool GetButtonDown(string name)
+	{
+		return m_instance?.TryGetButtonState(name, (ButtonDef b) => b.Pressed) ?? false;
+	}
+
+	public static bool GetButtonUp(string name)
+	{
+		return m_instance?.TryGetButtonState(name, (ButtonDef b) => b.Released) ?? false;
+	}
+
+	public static bool GetButton(string name)
+	{
+		return m_instance?.TryGetButtonState(name, (ButtonDef b) => b.Held) ?? false;
+	}
+
+	public static bool GetMouseButton(int button)
+	{
+		return m_instance?.TryGetButtonState(IntToMouseButtonString(button), (ButtonDef b) => b.Held) ?? false;
+	}
+
+	public static bool GetMouseButtonDown(int button)
+	{
+		return m_instance?.TryGetButtonState(IntToMouseButtonString(button), (ButtonDef b) => b.Pressed) ?? false;
+	}
+
+	public static bool GetMouseButtonUp(int button)
+	{
+		return m_instance?.TryGetButtonState(IntToMouseButtonString(button), (ButtonDef b) => b.Released) ?? false;
+	}
+
+	private bool TryGetButtonState(string name, Func<ButtonDef, bool> stateCheckProperty)
+	{
+		if (m_buttons.TryGetValue(name, out var value))
+		{
+			return stateCheckProperty(value);
+		}
+		return false;
+	}
+
+	public static float GetButtonPressedTimer(string name)
+	{
+		if (m_instance.m_buttons.TryGetValue(name, out var value))
+		{
+			return value.PressedTimer;
+		}
+		return 0f;
+	}
+
+	public static float GetButtonLastPressedTimer(string name)
+	{
+		if (m_instance.m_buttons.TryGetValue(name, out var value))
+		{
+			return value.LastPressedTimer;
+		}
+		return 0f;
+	}
+
+	public DateTime GetLastInputTimer()
+	{
+		return m_inputTimer;
+	}
+
+	public DateTime GetLastInputTimerGamepad()
+	{
+		return m_inputTimerGamepad;
+	}
+
+	public DateTime GetLastInputTimerMouse()
+	{
+		return m_inputTimerMouse;
+	}
+
+	public static bool GetKey(KeyCode key, bool logWarning = true)
+	{
+		return m_instance?.TryGetKeyStateLowLevel(key, (ButtonControl b) => b.isPressed, logWarning) ?? false;
+	}
+
+	public static bool GetKeyDown(KeyCode key, bool logWarning = true)
+	{
+		return m_instance?.TryGetKeyStateLowLevel(key, (ButtonControl b) => b.wasPressedThisFrame, logWarning) ?? false;
+	}
+
+	public static bool GetKeyUp(KeyCode key, bool logWarning = true)
+	{
+		return m_instance?.TryGetKeyStateLowLevel(key, (ButtonControl b) => b.wasReleasedThisFrame, logWarning) ?? false;
+	}
+
+	private bool TryGetKeyStateLowLevel(KeyCode keyCode, Func<ButtonControl, bool> stateCheckProperty, bool logWarning = false)
+	{
+		if (!IsKeyCodeValid(keyCode))
+		{
+			return false;
+		}
+		if (keyCode >= KeyCode.JoystickButton0)
+		{
+			if (Gamepad.current != null)
+			{
+				return stateCheckProperty(Gamepad.current[KeyCodeToGamepadButton(keyCode, logWarning)]);
+			}
+			return false;
+		}
+		if (keyCode >= KeyCode.Mouse0 && keyCode <= KeyCode.Mouse4)
+		{
+			if (Mouse.current != null)
+			{
+				return stateCheckProperty(KeyCodeToMouseButtonControl(keyCode, logWarning));
+			}
+			return false;
+		}
+		if (Keyboard.current != null)
+		{
+			return stateCheckProperty(Keyboard.current[KeyCodeToKey(keyCode, logWarning)]);
+		}
+		return false;
+	}
+
+	public ButtonDef GetButtonDef(string name)
+	{
+		return m_buttons.GetValueOrDefault(name);
+	}
+
+	public string GetBoundKeyString(string name, bool emptyStringOnMissing = false)
+	{
+		if (m_virtualKeyboardOpen)
+		{
+			return "";
+		}
+		if (!m_buttons.TryGetValue(name, out var value))
+		{
+			if (!emptyStringOnMissing)
+			{
+				return "MISSING BUTTON DEF \"" + name + "\"";
+			}
+			return "";
+		}
+		InputBinding inputBinding = value.ButtonAction.bindings.FirstOrDefault();
+		if (inputBinding == default(InputBinding))
+		{
+			if (!emptyStringOnMissing)
+			{
+				return "MISSING KEY BINDING \"" + name + "\"";
+			}
+			return "";
+		}
+		string key = MapKeyFromPath(inputBinding.effectivePath);
+		if (value.Source != InputSource.Gamepad)
+		{
+			if (!s_keyLocalizationMap.TryGetValue(key, out var value2))
+			{
+				return inputBinding.ToDisplayString(InputBinding.DisplayStringOptions.DontIncludeInteractions, Keyboard.current);
+			}
+			return value2;
+		}
+		if (m_blockGamePadInput > 0f)
+		{
+			return "";
+		}
+		string text;
+		switch (CurrentGlyph)
+		{
+		case GamepadGlyphs.Auto:
+		{
+			string text2;
+			switch (ConnectedGamepadType)
+			{
+			case GamepadType.XInput:
+				text2 = "xbox";
+				break;
+			case GamepadType.DualSense:
+			case GamepadType.DualShock:
+				text2 = "ps5";
+				break;
+			default:
+				text2 = "xbox";
+				break;
+			}
+			text = text2;
+			break;
+		}
+		case GamepadGlyphs.Xbox:
+			text = "xbox";
+			break;
+		case GamepadGlyphs.Playstation:
+			text = "ps5";
+			break;
+		default:
+			text = "xbox";
+			break;
+		}
+		string text3 = text;
+		return "<sprite=\"" + text3 + "\" name=\"" + s_gamepadSpriteMap[key][text3] + "\">";
+	}
+
+	public string GetBoundActionString(KeyCode keycode)
+	{
+		string str = "";
+		foreach (ButtonDef item in m_buttons.Values.Where((ButtonDef b) => b.ShowHints && b.Source != InputSource.Gamepad))
+		{
+			if (item.ButtonAction.bindings.FirstOrDefault((InputBinding e) => e.effectivePath.Contains(KeyCodeToKey(keycode).ToString())) != default(InputBinding))
+			{
+				TryFormatAndAddString(ref str, item);
+			}
+		}
+		return str;
+	}
+
+	public string GetBoundActionString(GamepadInput gamepadInput, FloatRange? mappedRange)
+	{
+		string str = "";
+		foreach (ButtonDef item in m_buttons.Values.Where((ButtonDef b) => b.ShowHints && b.Source == InputSource.Gamepad))
+		{
+			if (item.ButtonAction.bindings.FirstOrDefault((InputBinding e) => e.effectivePath == s_gamepadInputPathMap[gamepadInput]) != default(InputBinding))
+			{
+				TryFormatAndAddString(ref str, item);
+			}
+		}
+		return str;
+	}
+
+	private void TryFormatAndAddString(ref string str, ButtonDef button)
+	{
+		string text = button.Name.ToLower();
+		if (!text.Contains("radial") && !text.Contains("bumper") && !text.Contains("start") && !(text == "joyaltkeys"))
+		{
+			if (str.Length > 0)
+			{
+				str += " / ";
+			}
+			if (text.Length > 3 && text.ToLower().StartsWith("joy"))
+			{
+				text = text.Substring(3);
+			}
+			if (button.AltKey)
+			{
+				str = str + "<color=#AAAAAA>$settings_" + text + "</color>";
+			}
+			else if (IsNonClassicFunctionality() && (text == "rotate" || text == "rotateright"))
+			{
+				str += "$rotate_build_mode";
+			}
+			else
+			{
+				str = str + "$settings_" + text;
+			}
+		}
+	}
+
+	private void ClearGamepadButtons()
+	{
+		foreach (ButtonDef item in from button in m_buttons.Values.ToList()
+			where button.Source == InputSource.Gamepad
+			select button)
+		{
+			UnsubscribeButton(item);
+			item.ButtonAction.Disable();
+			m_buttons.Remove(item.Name);
+		}
+	}
+
+	private void ClearButtons()
+	{
+		UnsubscribeButtons();
+		m_buttons.Clear();
+	}
+
+	private void SubscribeButton(ButtonDef btn)
+	{
+		btn.ButtonAction.performed += OnActionPerformed;
+		btn.ButtonAction.canceled += OnActionCanceled;
+	}
+
+	private void SubscribeButtons()
+	{
+		foreach (ButtonDef value in m_buttons.Values)
+		{
+			value.ButtonAction.performed += OnActionPerformed;
+			value.ButtonAction.canceled += OnActionCanceled;
+		}
+	}
+
+	private void UnsubscribeButtons(bool disable = true)
+	{
+		foreach (ButtonDef value in m_buttons.Values)
+		{
+			value.ButtonAction.performed -= OnActionPerformed;
+			value.ButtonAction.canceled -= OnActionCanceled;
+			if (disable)
+			{
+				value.ButtonAction.Disable();
+			}
+		}
+	}
+
+	private void UnsubscribeButton(ButtonDef btn)
+	{
+		btn.ButtonAction.performed -= OnActionPerformed;
+		btn.ButtonAction.canceled -= OnActionCanceled;
+	}
+
+	public static void ResetButtonStatus(string name)
+	{
+		if (m_instance.m_buttons.TryGetValue(name, out var value))
+		{
+			value.ResetState();
+		}
+	}
+
+	public static void ResetAllButtonStates()
+	{
+		if (m_instance == null)
+		{
+			return;
+		}
+		foreach (ButtonDef value in m_instance.m_buttons.Values)
+		{
+			value.ResetState();
+		}
+	}
+
+	public void StartBindKey(string name)
+	{
+		if (!m_buttons.TryGetValue(name, out var value))
+		{
+			Debug.LogError("No button with name: " + name + " found! Cannot start rebind.");
+			return;
+		}
+		if (!value.Rebindable)
+		{
+			Debug.LogWarning("Button with name " + name + " is not set to rebindable.");
+			return;
+		}
+		InputAction action = value.ButtonAction;
+		if (action == null)
+		{
+			Debug.LogError("Button " + name + " does not have an assigned InputAction. Cannot start rebind.");
+			return;
+		}
+		action.Disable();
+		InputActionRebindingExtensions.RebindingOperation rebindingOperation = action.PerformInteractiveRebinding().WithCancelingThrough("<Keyboard>/escape").WithCancelingThrough("<Gamepad>/*");
+		if (value.Name.Contains("Tab"))
+		{
+			rebindingOperation.WithControlsExcluding("Mouse");
+		}
+		rebindingOperation.Start().OnComplete(delegate
+		{
+			OnRebindComplete(action);
+		}).OnCancel(delegate
+		{
+			OnRebindComplete(action);
+		});
+		s_IsRebindActive = true;
+	}
+
+	private void OnRebindComplete(InputAction action)
+	{
+		action.Enable();
+		s_IsRebindActive = false;
+	}
+
+	public void ResetToDefault(string name = "all")
+	{
+		if (name == "all")
+		{
+			foreach (ButtonDef value2 in m_buttons.Values)
+			{
+				value2.ResetBinding();
+			}
+			return;
+		}
+		if (!m_buttons.TryGetValue(name, out var value))
+		{
+			Debug.LogError("No button with name: " + name + " found. Can't reset.");
+		}
+		else
+		{
+			value.ResetBinding();
+		}
+	}
+
+	public static void UpdateRadialTapTime(float newDuration)
+	{
+		m_instance?.m_radialTap.ApplyParameterOverride("vector2Tap:duration", newDuration);
+	}
+
+	public static void UpdateRadialMultiTap(float newDuration, float newDelay, int newAmount, bool requireReleaseForFinal)
+	{
+		if (m_instance != null)
+		{
+			m_instance.m_radialMultiTap.ApplyParameterOverride("vector2MultiTap:tapTime", newDuration);
+			m_instance.m_radialMultiTap.ApplyParameterOverride("vector2MultiTap:tapDelay", newDelay);
+			m_instance.m_radialMultiTap.ApplyParameterOverride("vector2MultiTap:tapCount", newAmount);
+			m_instance.m_radialMultiTap.ApplyParameterOverride("vector2MultiTap:requireReleaseForFinal", requireReleaseForFinal);
+		}
+	}
+
+	public void ChangeLayout(InputLayout inputLayout)
+	{
+		InputLayout = inputLayout;
+		UpdateGamepadInputLayout();
+		PlatformPrefs.SetInt("ControllerLayout", (int)InputLayout);
+		ZInput.OnInputLayoutChanged?.Invoke();
+	}
+
+	private void UpdateGamepadInputLayout(bool clearButtons = true)
+	{
+		if (clearButtons)
+		{
+			ClearGamepadButtons();
+		}
+		ResetGamepadButtonsGeneric();
+		switch (InputLayout)
+		{
+		case InputLayout.Default:
+			ResetGamepadToClassic();
+			break;
+		case InputLayout.Alternative1:
+			ResetGamepadToAlt1();
+			break;
+		case InputLayout.Alternative2:
+			ResetGamepadToAlt2();
+			break;
+		}
+		if (SwapTriggers || SwapFaceButtons)
+		{
+			foreach (ButtonDef item in m_buttons.Values.Where((ButtonDef b) => b.Name.Contains("Joy")).ToList())
+			{
+				if (SwapTriggers)
+				{
+					SwapBindingPaths(item.ButtonAction, "<Gamepad>/leftTrigger", "<Gamepad>/rightTrigger");
+				}
+				if (SwapFaceButtons)
+				{
+					SwapBindingPaths(item.ButtonAction, "<Gamepad>/buttonSouth", "<Gamepad>/buttonEast");
+					SwapBindingPaths(item.ButtonAction, "<Gamepad>/buttonWest", "<Gamepad>/buttonNorth");
+				}
+			}
+		}
+		if (!SwapTriggers)
+		{
+			return;
+		}
+		foreach (ValueDef item2 in m_values.Values.Where((ValueDef v) => v.Name.Contains("Trigger")).ToList())
+		{
+			SwapBindingPaths(item2.ValueAction, "<Gamepad>/leftTrigger", "<Gamepad>/rightTrigger");
+		}
+	}
+
+	private void SwapBindingPaths(InputAction action, string bindingPath1, string bindingPath2)
+	{
+		action.ApplyBindingOverride(bindingPath1, null, bindingPath2);
+		action.ApplyBindingOverride(bindingPath2, null, bindingPath1);
+	}
+
+	public static void SetMousePosition(Vector2 newPos)
+	{
+		Mouse.current?.WarpCursorPosition(newPos);
+	}
+
+	public static bool IsKeyCodeValid(KeyCode keyCode)
+	{
+		if (keyCode != KeyCode.None && keyCode <= KeyCode.JoystickButton19 && keyCode != KeyCode.Mouse5)
+		{
+			return keyCode != KeyCode.Mouse6;
+		}
+		return false;
+	}
+
+	public static GamepadGlyphs ConnectedGamepadTypeGlyphs()
+	{
+		return ConnectedGamepadType switch
+		{
+			GamepadType.XInput => GamepadGlyphs.Xbox, 
+			GamepadType.DualSense => GamepadGlyphs.Playstation, 
+			GamepadType.DualShock => GamepadGlyphs.Playstation, 
+			_ => GamepadGlyphs.Xbox, 
+		};
+	}
+
+	public List<string> GetDuplicateBindings()
+	{
+		return (from b in m_buttons
+			group b by b.Value.GetActionPath() into g
+			where g.Count() > 1
+			select g).SelectMany((IGrouping<string, KeyValuePair<string, ButtonDef>> g) => g.Select((KeyValuePair<string, ButtonDef> b) => b.Key)).ToList();
+	}
+
+	private float ApplyDeadzoneFloat(float value, bool smooth)
+	{
+		float num = Mathf.Sign(value);
+		value = Mathf.Abs(value);
+		value = Mathf.Clamp01(value - 0.2f);
+		value *= 1.25f;
+		if (smooth)
+		{
+			value *= value;
+		}
+		return value * num;
+	}
+
+	private Vector2 ApplyDeadzoneVector(Vector2 value, bool smooth)
+	{
+		return new Vector2(ApplyDeadzoneFloat(value.x, smooth), ApplyDeadzoneFloat(value.y, smooth));
+	}
+
+	private static float GetScrollModifier()
+	{
+		return 1f;
+	}
+
+	public static void IgnoreMouseInputForFrames(int frames)
+	{
+		m_ignoreMouseInputFrames = frames;
+	}
+
+	private string MapKeyFromPath(string path)
+	{
+		string[] array = path.Split("/").Skip(1).ToArray();
+		string text = array[^1];
+		return string.Join("_", (text == "x" || text == "y") ? array[..^1] : array);
+	}
+
+	private static string IntToMouseButtonString(int button, bool logWarning = true)
+	{
+		if (TryIntToMouseButtonString(button, out var result))
+		{
+			return result;
+		}
+		if (logWarning)
+		{
+			Debug.LogError($"{button} is not a valid Mouse Button. Returning \"MouseLeft\"");
+		}
+		return result;
+	}
+
+	private static bool TryIntToMouseButtonString(int button, out string result)
+	{
+		switch (button)
+		{
+		case 0:
+			result = "MouseLeft";
+			return true;
+		case 1:
+			result = "MouseRight";
+			return true;
+		case 2:
+			result = "MouseMiddle";
+			return true;
+		case 3:
+			result = "MouseForward";
+			return true;
+		case 4:
+			result = "MouseBack";
+			return true;
+		default:
+			result = "MouseLeft";
+			return false;
+		}
+	}
+
+	private static Key KeyCodeToKey(KeyCode keyCode, bool logWarning = true)
+	{
+		if (TryKeyCodeToKey(keyCode, out var result))
+		{
+			return result;
+		}
+		if (logWarning)
+		{
+			Debug.LogWarning($"The KeyCode: {keyCode}, lacks a proper counterpart in the Key enum. Returning \"Key.None\".");
+		}
+		return result;
+	}
+
+	private static bool TryKeyCodeToKey(KeyCode keyCode, out Key result)
+	{
+		result = Key.None;
+		return s_keyCodeToKeyMap.TryGetValue(keyCode, out result);
+	}
+
+	private static ButtonControl KeyCodeToMouseButtonControl(KeyCode keyCode, bool logWarning = true)
+	{
+		if (Mouse.current == null)
+		{
+			return null;
+		}
+		return KeyCodeToMouseButton(keyCode, logWarning) switch
+		{
+			MouseButton.Left => Mouse.current.leftButton, 
+			MouseButton.Right => Mouse.current.rightButton, 
+			MouseButton.Middle => Mouse.current.middleButton, 
+			MouseButton.Forward => Mouse.current.forwardButton, 
+			MouseButton.Back => Mouse.current.backButton, 
+			_ => null, 
+		};
+	}
+
+	private static MouseButton KeyCodeToMouseButton(KeyCode keyCode, bool logWarning = true)
+	{
+		if (TryKeyCodeToMouseButton(keyCode, out var result))
+		{
+			return result;
+		}
+		if (logWarning)
+		{
+			Debug.LogWarning($"The KeyCode: {keyCode}, lacks a proper counterpart in the Key enum. Returning Left Button.");
+		}
+		return result;
+	}
+
+	private static bool TryKeyCodeToMouseButton(KeyCode keyCode, out MouseButton result)
+	{
+		result = MouseButton.Left;
+		return s_keyCodeToMouseButtonMap.TryGetValue(keyCode, out result);
+	}
+
+	private static GamepadButton KeyCodeToGamepadButton(KeyCode keyCode, bool logWarning = true)
+	{
+		if (TryKeyCodeToGamepadButton(keyCode, out var result))
+		{
+			return result;
+		}
+		if (logWarning)
+		{
+			Debug.LogWarning($"The KeyCode: {keyCode}, lacks a proper counterpart in the GamepadButton enum. Returning South Button.");
+		}
+		return result;
+	}
+
+	private static bool TryKeyCodeToGamepadButton(KeyCode keyCode, out GamepadButton result)
+	{
+		result = GamepadButton.South;
+		if (keyCode < KeyCode.JoystickButton0 || keyCode > KeyCode.JoystickButton19)
+		{
+			return false;
+		}
+		if (Application.platform != RuntimePlatform.OSXPlayer && Application.platform != RuntimePlatform.OSXServer && Application.platform != RuntimePlatform.OSXEditor)
+		{
+			return s_keyCodeToGamepadButtonMap.TryGetValue(keyCode, out result);
+		}
+		switch (keyCode)
+		{
+		case KeyCode.JoystickButton5:
+			result = GamepadButton.DpadUp;
+			return true;
+		case KeyCode.JoystickButton6:
+			result = GamepadButton.DpadDown;
+			return true;
+		case KeyCode.JoystickButton7:
+			result = GamepadButton.DpadLeft;
+			return true;
+		case KeyCode.JoystickButton8:
+			result = GamepadButton.DpadRight;
+			return true;
+		case KeyCode.JoystickButton9:
+			result = GamepadButton.Start;
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	private static GamepadInput KeyCodeToGamepadInput(KeyCode keyCode, bool logWarning = true)
+	{
+		if (TryKeyCodeToGamepadInput(keyCode, out var result))
+		{
+			return result;
+		}
+		if (logWarning)
+		{
+			Debug.LogWarning($"The KeyCode: {keyCode}, lacks a proper counterpart in the GamepadButton enum. Returning South Button.");
+		}
+		return result;
+	}
+
+	private static bool TryKeyCodeToGamepadInput(KeyCode keyCode, out GamepadInput result)
+	{
+		result = GamepadInput.FaceButtonA;
+		if (keyCode < KeyCode.JoystickButton0 || keyCode > KeyCode.JoystickButton19)
+		{
+			return false;
+		}
+		if (Application.platform == RuntimePlatform.OSXPlayer || Application.platform == RuntimePlatform.OSXServer || Application.platform == RuntimePlatform.OSXEditor)
+		{
+			switch (keyCode)
+			{
+			case KeyCode.JoystickButton5:
+				result = GamepadInput.DPadUp;
+				return true;
+			case KeyCode.JoystickButton6:
+				result = GamepadInput.DPadDown;
+				return true;
+			case KeyCode.JoystickButton7:
+				result = GamepadInput.DPadLeft;
+				return true;
+			case KeyCode.JoystickButton8:
+				result = GamepadInput.DPadRight;
+				return true;
+			case KeyCode.JoystickButton9:
+				result = GamepadInput.Start;
+				return true;
+			}
+		}
+		return s_keyCodeToGamepadInputMap.TryGetValue(keyCode, out result);
+	}
+
+	public static string KeyCodeToDisplayName(KeyCode keyCode)
+	{
+		return ((ButtonControl)InputSystem.FindControl(KeyCodeToPath(keyCode)))?.displayName ?? ("$KeyCode " + keyCode.ToString() + " did not have corresponding ButtonControl");
+	}
+
+	private static string KeyCodeToPath(KeyCode keyCode, bool logWarning = false)
+	{
+		if (TryKeyCodeToGamepadInput(keyCode, out var result))
+		{
+			return s_gamepadInputPathMap.GetValueOrDefault(result, "<Gamepad>/None");
+		}
+		if (TryKeyCodeToMouseButton(keyCode, out var result2))
+		{
+			return MouseButtonToPath(result2);
+		}
+		if (TryKeyCodeToKey(keyCode, out var result3))
+		{
+			return KeyToPath(result3);
+		}
+		if (logWarning)
+		{
+			Debug.LogError("No corresponding path for KeyCode \"" + keyCode.ToString() + "\" found!");
+		}
+		return KeyToPath(Key.None);
+	}
+
+	private static string MouseButtonToPath(MouseButton btn, bool full = true)
+	{
+		if (!full)
+		{
+			return btn.ToString().ToLower() + "Button";
+		}
+		return "<Mouse>/" + btn.ToString().ToLower() + "Button";
+	}
+
+	private static string KeyToPath(Key key)
+	{
+		string text = key.ToString();
+		if (text != null)
+		{
+			if (text.Contains("Digit"))
+			{
+				return $"<Keyboard>/{text[text.Length - 1]}";
+			}
+			if (text.Contains("Apple"))
+			{
+				return "<Keyboard>/" + text.Substring(0, text.IndexOf("A", StringComparison.Ordinal)) + "Meta";
+			}
+			if (text.Contains("Windows"))
+			{
+				return "<Keyboard>/" + text.Substring(0, text.IndexOf("W", StringComparison.Ordinal)) + "Meta";
+			}
+			if (text.Contains("Command"))
+			{
+				return "<Keyboard>/" + text.Substring(0, text.IndexOf("C", StringComparison.Ordinal)) + "Meta";
+			}
+		}
+		return "<Keyboard>/" + text;
+	}
+
+	private void AddValue(string name, string path, string interactions = null, string processors = null)
+	{
+		ValueDef value = new ValueDef(name, path, interactions, processors);
+		m_values.Add(name, value);
+	}
+
+	private void AddButton(string name, string path, bool altKey = false, bool showHints = true, bool rebindable = false, float repeatDelay = 0f, float repeatInterval = 0f)
+	{
+		ButtonDef buttonDef = new ButtonDef(name, path, altKey, showHints, rebindable, repeatDelay, repeatInterval, 0.4f.ToGlobalInvariantString());
+		m_buttons.Add(name, buttonDef);
+		SubscribeButton(buttonDef);
+	}
+
+	private void SetUpMouseAndStickHandlers()
+	{
+		m_mouseDelta = new InputAction("MouseDelta", InputActionType.Value, "<Mouse>/delta", null, "scaleVector2(x=0.05,y=0.05)");
+		m_mouseDelta.Enable();
+		m_mousePosition = new InputAction("MousePosition", InputActionType.Value, "<Mouse>/position");
+		m_mousePosition.Enable();
+		m_mouseScrollDeltaAction = new InputAction("MouseScrollDelta", InputActionType.Value, "<Mouse>/scroll/y", null, "scale(factor=0.05)");
+		m_mouseScrollDeltaAction.Enable();
+		string text = 0.2f.ToGlobalInvariantString();
+		m_radialTap = new InputAction("RadialTap", InputActionType.Value, "<Gamepad>/rightStick", "vector2Tap", "vector2Deadzone(deadzone=" + text + ")");
+		m_radialTap.Enable();
+		m_radialMultiTap = new InputAction("RadialMultiTap", InputActionType.Value, "<Gamepad>/rightStick", "vector2MultiTap", "vector2Deadzone(deadzone=" + text + ")");
+		m_radialMultiTap.Enable();
+	}
+
+	private void SetUpStickHandlers()
+	{
+		AddValue("StickRHorizontal", s_gamepadInputPathMap[GamepadInput.StickRHorizontal]);
+		AddValue("StickRVertical", s_gamepadInputPathMap[GamepadInput.StickRVertical]);
+		AddValue("StickLHorizontal", s_gamepadInputPathMap[GamepadInput.StickLHorizontal]);
+		AddValue("StickLVertical", s_gamepadInputPathMap[GamepadInput.StickLVertical]);
+		AddValue("StickL", s_gamepadInputPathMap[GamepadInput.StickL]);
+		AddValue("StickR", s_gamepadInputPathMap[GamepadInput.StickR]);
+		AddValue("RadialStick", s_gamepadInputPathMap[GamepadInput.StickR]);
+		AddValue("TriggerL", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddValue("TriggerR", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+	}
+
+	private void ResetKBMButtons()
+	{
+		AddButton("MouseLeft", MouseButtonToPath(MouseButton.Left));
+		AddButton("MouseRight", MouseButtonToPath(MouseButton.Right));
+		AddButton("MouseMiddle", MouseButtonToPath(MouseButton.Middle));
+		AddButton("MouseForward", MouseButtonToPath(MouseButton.Forward));
+		AddButton("MouseBack", MouseButtonToPath(MouseButton.Back));
+		AddButton("Attack", MouseButtonToPath(MouseButton.Left), altKey: false, showHints: true, rebindable: true);
+		AddButton("SecondaryAttack", MouseButtonToPath(MouseButton.Middle), altKey: false, showHints: true, rebindable: true);
+		AddButton("Block", MouseButtonToPath(MouseButton.Right), altKey: false, showHints: true, rebindable: true);
+		AddButton("Use", KeyToPath(Key.E), altKey: false, showHints: true, rebindable: true);
+		AddButton("Hide", KeyToPath(Key.R), altKey: false, showHints: true, rebindable: true);
+		AddButton("Jump", KeyToPath(Key.Space), altKey: false, showHints: true, rebindable: true);
+		AddButton("Crouch", KeyToPath(Key.LeftCtrl), altKey: false, showHints: true, rebindable: true);
+		AddButton("Run", KeyToPath(Key.LeftShift), altKey: false, showHints: true, rebindable: true);
+		AddButton("ToggleWalk", KeyToPath(Key.C), altKey: false, showHints: true, rebindable: true);
+		AddButton("AutoRun", KeyToPath(Key.Q), altKey: false, showHints: true, rebindable: true);
+		AddButton("Sit", KeyToPath(Key.X), altKey: false, showHints: true, rebindable: true);
+		AddButton("GP", KeyToPath(Key.F), altKey: false, showHints: true, rebindable: true);
+		AddButton("AltPlace", KeyToPath(Key.LeftShift), altKey: false, showHints: true, rebindable: true);
+		AddButton("CamZoomIn", KeyToPath(Key.None));
+		AddButton("CamZoomOut", KeyToPath(Key.None));
+		AddButton("Forward", KeyToPath(Key.W), altKey: false, showHints: true, rebindable: true, 0.3f, 0.1f);
+		AddButton("Left", KeyToPath(Key.A), altKey: false, showHints: true, rebindable: true, 0.3f, 0.1f);
+		AddButton("Backward", KeyToPath(Key.S), altKey: false, showHints: true, rebindable: true, 0.3f, 0.1f);
+		AddButton("Right", KeyToPath(Key.D), altKey: false, showHints: true, rebindable: true, 0.3f, 0.1f);
+		AddButton("Inventory", KeyToPath(Key.Tab), altKey: false, showHints: true, rebindable: true);
+		AddButton("Map", KeyToPath(Key.M), altKey: false, showHints: true, rebindable: true);
+		AddButton("MapZoomOut", KeyToPath(Key.Comma), altKey: false, showHints: true, rebindable: true);
+		AddButton("MapZoomIn", KeyToPath(Key.Period), altKey: false, showHints: true, rebindable: true);
+		AddButton("Escape", KeyToPath(Key.Escape));
+		AddButton("TabLeft", KeyToPath(Key.Q), altKey: false, showHints: true, rebindable: true);
+		AddButton("TabRight", KeyToPath(Key.E), altKey: false, showHints: true, rebindable: true);
+		AddButton("BuildMenu", MouseButtonToPath(MouseButton.Right), altKey: false, showHints: true, rebindable: true);
+		AddButton("Remove", MouseButtonToPath(MouseButton.Middle), altKey: false, showHints: true, rebindable: true);
+		AddButton("AutoPickup", KeyToPath(Key.V), altKey: false, showHints: true, rebindable: true);
+		AddButton("ScrollChatUp", KeyToPath(Key.PageUp), altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("ScrollChatDown", KeyToPath(Key.PageDown), altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("ChatUp", KeyToPath(Key.UpArrow), altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("ChatDown", KeyToPath(Key.DownArrow), altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("Console", KeyToPath(Key.F5), altKey: false, showHints: true, rebindable: true);
+		AddButton("OpenRadial", KeyToPath(Key.G), altKey: false, showHints: true, rebindable: true);
+		AddButton("OpenEmote", KeyToPath(Key.T), altKey: false, showHints: true, rebindable: true);
+		AddButton("RadialSecondaryInteract", MouseButtonToPath(MouseButton.Right));
+		AddButton("Chat", KeyToPath(Key.Enter));
+		AddButton("Hotbar1", KeyToPath(Key.Digit1));
+		AddButton("Hotbar2", KeyToPath(Key.Digit2));
+		AddButton("Hotbar3", KeyToPath(Key.Digit3));
+		AddButton("Hotbar4", KeyToPath(Key.Digit4));
+		AddButton("Hotbar5", KeyToPath(Key.Digit5));
+		AddButton("Hotbar6", KeyToPath(Key.Digit6));
+		AddButton("Hotbar7", KeyToPath(Key.Digit7));
+		AddButton("Hotbar8", KeyToPath(Key.Digit8));
+		AddButton("Tab", KeyToPath(Key.Tab));
+		AddButton("LShift", KeyToPath(Key.LeftShift));
+	}
+
+	private void ResetGamepadButtonsGeneric()
+	{
+		AddButton("JoyButtonA", s_gamepadInputPathMap[GamepadInput.FaceButtonA], altKey: false, showHints: false);
+		AddButton("JoyButtonB", s_gamepadInputPathMap[GamepadInput.FaceButtonB], altKey: false, showHints: false);
+		AddButton("JoyButtonX", s_gamepadInputPathMap[GamepadInput.FaceButtonX], altKey: false, showHints: false);
+		AddButton("JoyButtonY", s_gamepadInputPathMap[GamepadInput.FaceButtonY], altKey: false, showHints: false);
+		AddButton("JoyBack", s_gamepadInputPathMap[GamepadInput.Select], altKey: false, showHints: false);
+		AddButton("JoyStart", s_gamepadInputPathMap[GamepadInput.Start]);
+		AddButton("JoyLStick", s_gamepadInputPathMap[GamepadInput.StickLButton], altKey: false, showHints: false);
+		AddButton("JoyRStick", s_gamepadInputPathMap[GamepadInput.StickRButton], altKey: false, showHints: false);
+		AddButton("JoyLStickLeft", s_gamepadInputPathMap[GamepadInput.StickLLeft], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyLStickRight", s_gamepadInputPathMap[GamepadInput.StickLRight], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyLStickUp", s_gamepadInputPathMap[GamepadInput.StickLUp], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyLStickDown", s_gamepadInputPathMap[GamepadInput.StickLDown], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyRStickLeft", s_gamepadInputPathMap[GamepadInput.StickRLeft], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyRStickRight", s_gamepadInputPathMap[GamepadInput.StickRRight], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyRStickUp", s_gamepadInputPathMap[GamepadInput.StickRUp], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyRStickDown", s_gamepadInputPathMap[GamepadInput.StickRDown], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyDPadLeft", s_gamepadInputPathMap[GamepadInput.DPadLeft], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyDPadRight", s_gamepadInputPathMap[GamepadInput.DPadRight], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyDPadUp", s_gamepadInputPathMap[GamepadInput.DPadUp], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyDPadDown", s_gamepadInputPathMap[GamepadInput.DPadDown], altKey: false, showHints: false, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyLBumper", s_gamepadInputPathMap[GamepadInput.BumperL], altKey: false, showHints: false);
+		AddButton("JoyRBumper", s_gamepadInputPathMap[GamepadInput.BumperR], altKey: false, showHints: false);
+		AddButton("JoyLTrigger", s_gamepadInputPathMap[GamepadInput.TriggerL], altKey: false, showHints: false);
+		AddButton("JoyRTrigger", s_gamepadInputPathMap[GamepadInput.TriggerR], altKey: false, showHints: false);
+		AddButton("JoyMap", s_gamepadInputPathMap[GamepadInput.Select]);
+		AddButton("JoyChat", s_gamepadInputPathMap[GamepadInput.Select], altKey: true);
+		AddButton("JoyMenu", s_gamepadInputPathMap[GamepadInput.Start]);
+		AddButton("JoyToggleHUD", s_gamepadInputPathMap[GamepadInput.Start], altKey: true);
+	}
+
+	private void ResetGamepadToClassic()
+	{
+		AddButton("JoyBuildMenu", s_gamepadInputPathMap[GamepadInput.FaceButtonA]);
+		AddButton("JoyUse", s_gamepadInputPathMap[GamepadInput.FaceButtonA]);
+		AddButton("JoyHide", s_gamepadInputPathMap[GamepadInput.StickRButton]);
+		AddButton("JoyJump", s_gamepadInputPathMap[GamepadInput.FaceButtonB]);
+		AddButton("JoyDodge", s_gamepadInputPathMap[GamepadInput.FaceButtonB], altKey: true);
+		AddButton("JoySit", s_gamepadInputPathMap[GamepadInput.FaceButtonX]);
+		AddButton("JoyGP", s_gamepadInputPathMap[GamepadInput.DPadDown]);
+		AddButton("JoyInventory", s_gamepadInputPathMap[GamepadInput.FaceButtonY]);
+		AddButton("JoyRun", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyCrouch", s_gamepadInputPathMap[GamepadInput.StickLButton]);
+		AddButton("JoyHotbarUse", s_gamepadInputPathMap[GamepadInput.DPadUp]);
+		AddButton("JoyCamZoomIn", s_gamepadInputPathMap[GamepadInput.DPadUp], altKey: true);
+		AddButton("JoyCamZoomOut", s_gamepadInputPathMap[GamepadInput.DPadDown], altKey: true);
+		AddButton("JoyMiniMapZoomIn", s_gamepadInputPathMap[GamepadInput.DPadRight], altKey: true);
+		AddButton("JoyMiniMapZoomOut", s_gamepadInputPathMap[GamepadInput.DPadLeft], altKey: true);
+		AddButton("JoyHotbarLeft", s_gamepadInputPathMap[GamepadInput.DPadLeft], altKey: false, showHints: true, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyHotbarRight", s_gamepadInputPathMap[GamepadInput.DPadRight], altKey: false, showHints: true, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyAutoPickup", s_gamepadInputPathMap[GamepadInput.StickLButton], altKey: true);
+		AddButton("JoyBlock", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyAttack", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoySecondaryAttack", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyRadial", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyRadialInteract", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyRadialSecondaryInteract", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyRadialBack", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyRadialClose", s_gamepadInputPathMap[GamepadInput.FaceButtonB]);
+		AddButton("JoyAltPlace", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyRotate", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyPlace", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyRemove", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyTabLeft", s_gamepadInputPathMap[GamepadInput.BumperL], altKey: false, showHints: false);
+		AddButton("JoyTabRight", s_gamepadInputPathMap[GamepadInput.BumperR], altKey: false, showHints: false);
+		AddButton("JoyNextSnap", s_gamepadInputPathMap[GamepadInput.StickRButton]);
+		AddButton("JoyPrevSnap", s_gamepadInputPathMap[GamepadInput.StickLButton]);
+		AddButton("JoyAltKeys", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyScrollChatUp", s_gamepadInputPathMap[GamepadInput.StickRUp], altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("JoyScrollChatDown", s_gamepadInputPathMap[GamepadInput.StickRDown], altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+	}
+
+	private void ResetGamepadToAlt1()
+	{
+		AddButton("JoyJump", s_gamepadInputPathMap[GamepadInput.FaceButtonA]);
+		AddButton("JoyUse", s_gamepadInputPathMap[GamepadInput.FaceButtonX]);
+		AddButton("JoyInventory", s_gamepadInputPathMap[GamepadInput.FaceButtonY]);
+		AddButton("JoyBlock", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyAttack", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyHide", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoySecondaryAttack", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyRun", s_gamepadInputPathMap[GamepadInput.StickLButton]);
+		AddButton("JoyCrouch", s_gamepadInputPathMap[GamepadInput.StickRButton]);
+		AddButton("JoyHotbarLeft", s_gamepadInputPathMap[GamepadInput.DPadLeft], altKey: false, showHints: true, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyHotbarRight", s_gamepadInputPathMap[GamepadInput.DPadRight], altKey: false, showHints: true, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyHotbarUse", s_gamepadInputPathMap[GamepadInput.DPadUp]);
+		AddButton("JoySit", s_gamepadInputPathMap[GamepadInput.DPadDown]);
+		AddButton("JoyRadial", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyRadialInteract", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyRadialSecondaryInteract", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyRadialBack", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyRadialClose", s_gamepadInputPathMap[GamepadInput.FaceButtonB]);
+		AddButton("JoyAltKeys", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyCamZoomIn", s_gamepadInputPathMap[GamepadInput.DPadUp], altKey: true);
+		AddButton("JoyCamZoomOut", s_gamepadInputPathMap[GamepadInput.DPadDown], altKey: true);
+		AddButton("JoyMiniMapZoomIn", s_gamepadInputPathMap[GamepadInput.DPadRight], altKey: true);
+		AddButton("JoyMiniMapZoomOut", s_gamepadInputPathMap[GamepadInput.DPadLeft], altKey: true);
+		AddButton("JoyBuildMenu", s_gamepadInputPathMap[GamepadInput.FaceButtonB]);
+		AddButton("JoyPlace", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyRemove", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyRotate", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyRotateRight", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyNextSnap", s_gamepadInputPathMap[GamepadInput.StickRButton]);
+		AddButton("JoyPrevSnap", s_gamepadInputPathMap[GamepadInput.StickLButton]);
+		AddButton("JoyAltPlace", s_gamepadInputPathMap[GamepadInput.StickRButton], altKey: true);
+		AddButton("JoyDodge", s_gamepadInputPathMap[GamepadInput.FaceButtonB], altKey: true);
+		AddButton("JoyTabLeft", s_gamepadInputPathMap[GamepadInput.BumperL], altKey: false, showHints: false);
+		AddButton("JoyTabRight", s_gamepadInputPathMap[GamepadInput.BumperR], altKey: false, showHints: false);
+		AddButton("JoyScrollChatUp", s_gamepadInputPathMap[GamepadInput.StickRUp], altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("JoyScrollChatDown", s_gamepadInputPathMap[GamepadInput.StickRDown], altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("JoyAutoPickup", s_gamepadInputPathMap[GamepadInput.StickLButton], altKey: true);
+	}
+
+	private void ResetGamepadToAlt2()
+	{
+		AddButton("JoyJump", s_gamepadInputPathMap[GamepadInput.FaceButtonA]);
+		AddButton("JoyDodge", s_gamepadInputPathMap[GamepadInput.FaceButtonB], altKey: true);
+		AddButton("JoyUse", s_gamepadInputPathMap[GamepadInput.FaceButtonX]);
+		AddButton("JoyInventory", s_gamepadInputPathMap[GamepadInput.FaceButtonY]);
+		AddButton("JoyHide", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoySecondaryAttack", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyBlock", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyAttack", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyRun", s_gamepadInputPathMap[GamepadInput.StickLButton]);
+		AddButton("JoyCrouch", s_gamepadInputPathMap[GamepadInput.StickRButton]);
+		AddButton("JoyHotbarLeft", s_gamepadInputPathMap[GamepadInput.DPadLeft], altKey: false, showHints: true, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyHotbarRight", s_gamepadInputPathMap[GamepadInput.DPadRight], altKey: false, showHints: true, rebindable: false, 0.3f, 0.1f);
+		AddButton("JoyHotbarUse", s_gamepadInputPathMap[GamepadInput.DPadUp]);
+		AddButton("JoySit", s_gamepadInputPathMap[GamepadInput.DPadDown]);
+		AddButton("JoyRadial", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyRadialInteract", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyRadialSecondaryInteract", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyRadialBack", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyRadialClose", s_gamepadInputPathMap[GamepadInput.FaceButtonB]);
+		AddButton("JoyAltKeys", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyCamZoomIn", s_gamepadInputPathMap[GamepadInput.DPadUp], altKey: true);
+		AddButton("JoyCamZoomOut", s_gamepadInputPathMap[GamepadInput.DPadDown], altKey: true);
+		AddButton("JoyMiniMapZoomIn", s_gamepadInputPathMap[GamepadInput.DPadRight], altKey: true);
+		AddButton("JoyMiniMapZoomOut", s_gamepadInputPathMap[GamepadInput.DPadLeft], altKey: true);
+		AddButton("JoyBuildMenu", s_gamepadInputPathMap[GamepadInput.FaceButtonB]);
+		AddButton("JoyPlace", s_gamepadInputPathMap[GamepadInput.BumperR]);
+		AddButton("JoyRemove", s_gamepadInputPathMap[GamepadInput.BumperL]);
+		AddButton("JoyRotate", s_gamepadInputPathMap[GamepadInput.TriggerL]);
+		AddButton("JoyRotateRight", s_gamepadInputPathMap[GamepadInput.TriggerR]);
+		AddButton("JoyNextSnap", s_gamepadInputPathMap[GamepadInput.StickRButton]);
+		AddButton("JoyPrevSnap", s_gamepadInputPathMap[GamepadInput.StickLButton]);
+		AddButton("JoyAltPlace", s_gamepadInputPathMap[GamepadInput.StickRButton], altKey: true);
+		AddButton("JoyTabLeft", s_gamepadInputPathMap[GamepadInput.BumperL], altKey: false, showHints: false);
+		AddButton("JoyTabRight", s_gamepadInputPathMap[GamepadInput.BumperR], altKey: false, showHints: false);
+		AddButton("JoyScrollChatUp", s_gamepadInputPathMap[GamepadInput.StickRUp], altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("JoyScrollChatDown", s_gamepadInputPathMap[GamepadInput.StickRDown], altKey: false, showHints: true, rebindable: false, 0.5f, 0.05f);
+		AddButton("JoyAutoPickup", s_gamepadInputPathMap[GamepadInput.StickLButton], altKey: true);
+	}
+
+	private static bool ShouldAcceptInputFromSource(InputSource inputSource)
+	{
+		if (inputSource == InputSource.Gamepad && (m_blockGamePadInput > 0f || VirtualKeyboardOpen))
+		{
+			return false;
+		}
+		if (!IsInputSwitchingModeValid())
+		{
+			ZLog.LogWarning($"Input switching mode {s_inputSwitchingMode} invalid! Accepting all input!");
+			return true;
+		}
+		if (!s_inputSwitchingMode.HasFlag(InputSource.BlockingBit))
+		{
+			return true;
+		}
+		return s_inputSwitchingMode.HasFlag(inputSource & InputSource.AllowedInputMask);
+	}
+
+	private static bool IsInputSwitchingModeValid()
+	{
+		if (!s_isInputSwitchingModeValid.HasValue)
+		{
+			s_isInputSwitchingModeValid = Enum.IsDefined(typeof(InputSource), s_inputSwitchingMode) && s_inputSwitchingMode.HasFlag(InputSource.InputSwitchingModeBit | InputSource.ValidBit);
+		}
+		return s_isInputSwitchingModeValid.Value;
+	}
+
+	public static bool IsNonClassicFunctionality()
+	{
+		InputLayout inputLayout = InputLayout;
+		return inputLayout == InputLayout.Alternative1 || inputLayout == InputLayout.Alternative2;
+	}
+
+	public static bool IsGamepadEnabled()
+	{
+		return s_inputSwitchingMode.HasFlag(InputSource.AllowGamepadInputBit);
+	}
+
+	public static bool IsGamepadActive()
+	{
+		if (m_virtualKeyboardOpen)
+		{
+			return false;
+		}
+		if (m_instance == null || !IsGamepadEnabled())
+		{
+			return false;
+		}
+		return m_inputSource == InputSource.Gamepad;
+	}
+
+	public static bool IsKeyboardAvailable()
+	{
+		if (Keyboard.current != null)
+		{
+			return !m_virtualKeyboardOpen;
+		}
+		return false;
+	}
+
+	public static void CheckKeyboardMouseConnected(out bool keyboardConnected, out bool mouseConnected)
+	{
+		bool flag = m_inputSource == InputSource.KeyboardMouse;
+		keyboardConnected = flag || Keyboard.current != null;
+		mouseConnected = flag || Mouse.current != null;
+	}
+
+	public static bool IsMouseActive()
+	{
+		return m_instance.Internal_IsMouseActive();
+	}
+
+	private bool Internal_IsMouseActive()
+	{
+		if (Mouse.current != null)
+		{
+			return m_inputSource == InputSource.KeyboardMouse;
+		}
+		return false;
+	}
+}

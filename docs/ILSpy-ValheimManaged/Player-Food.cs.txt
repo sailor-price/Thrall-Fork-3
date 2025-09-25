@@ -1,0 +1,21 @@
+// assembly_valheim, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null
+// Player.Food
+public class Food
+{
+	public string m_name = "";
+
+	public ItemDrop.ItemData m_item;
+
+	public float m_time;
+
+	public float m_health;
+
+	public float m_stamina;
+
+	public float m_eitr;
+
+	public bool CanEatAgain()
+	{
+		return m_time < m_item.m_shared.m_foodBurnTime / 2f;
+	}
+}

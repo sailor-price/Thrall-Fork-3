@@ -20,6 +20,7 @@ namespace ThrallForked
             Log.LogInfo($"{Name} {Version} loaded");
             _harmony = new Harmony(GUID);
             // _harmony.PatchAll(); // enable when patches are added
+            _harmony.PatchAll();
         }
 
         private void OnDestroy()

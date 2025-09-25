@@ -31,3 +31,9 @@ Thumbs.db
 # Instead, ignore only junk .txt in bin/obj
 bin/**/*.txt
 obj/**/*.txt
+# Visual Studio cache
+.vs/
+*.db
+*.db-shm
+*.db-wal
+*.vsidx
